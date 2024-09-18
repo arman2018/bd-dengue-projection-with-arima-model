@@ -1,0 +1,181 @@
+##My working directory
+setwd("D:/Research/Dengue projection study")
+
+#Load the necessary libraries
+library(readxl)#for excel data read
+library(tidyverse)#for data processing
+library(tseries)#for time series format
+library(zoo)#for time series process
+library(forecast)#for time series modeling and forecasting
+library(ggplot2)#for visualization
+library(scales)#for scaling
+library(gridExtra)#combining plot
+
+
+#Upload the data
+data<-read_excel("df_DENV__ARMAN.xlsx",sheet="Data")
+head(data)
+
+##Descriptive statistics
+# Aggregate cases by year
+yearly_totals <- data %>%
+  group_by(Year) %>%
+  summarize(Total_Cases = sum(Cases))
+
+View(yearly_totals)
+
+# Average cases by year,min, max and SD for each year.
+yearly_stats <- data %>%
+  group_by(Year) %>%
+  summarize(
+    Avg_Cases = mean(Cases, na.rm = TRUE),  # Yearly average cases
+    Min_Cases = min(Cases, na.rm = TRUE),   # Minimum cases for each year
+    Max_Cases = max(Cases, na.rm = TRUE),   # Maximum cases for each year
+    SD_Cases = sd(Cases, na.rm = TRUE)      # Standard deviation of cases for each year
+  )
+
+View(yearly_stats)
+
+# Plot with points for outliers
+ggplot(data, aes(x = factor(Months), y = Cases)) +
+  geom_boxplot(fill = "lightblue", outlier.color = "red", outlier.size = 2) +  # Red points for outliers
+  labs(title = "Seasonality of Dengue Cases (2000-2023)", x = "Months", y = "Dengue Cases") +
+  theme_minimal()
+
+
+##ARIMA modeling
+dengue_ts<-ts(data$Cases, start = c(2000, 1), frequency = 12)#Time series formatting
+#Time series plot
+plot(dengue_ts, main = "Monthly Dengue Cases (2000-2023)", ylab = "Cases", xlab = "Year")
+
+##Time series plotting highlighting 2019 and 2023 epidemic year
+ggplot(data, aes(x = date, y = Cases)) + 
+  geom_line(color = "steelblue", size = 1.2) +          # Main line color and size
+  geom_point(data = subset(data, Year == 2019 | Year == 2023), 
+             aes(color = factor(Year)), size = 3) +     # Highlight 2019 and 2023
+  scale_color_manual(values = c("2019" = "red", "2023" = "purple"),
+                     labels = c("2019 Peak", "2023 Peak")) +  # Custom color and labels
+  theme_minimal(base_size = 15) +                       # Minimal theme with larger font size
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size = 12),  # Rotated X-axis labels
+    axis.text.y = element_text(color = "black", size = 12),                         # Y-axis labels
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 18),               # Bold, centered title
+    panel.grid.minor = element_blank(),                                             # Remove minor grid lines
+    panel.grid.major.x = element_line(size = 0.2, color = "gray80"),                # Light major grid lines
+    legend.position = c(0.8, 0.85),                                                 # Legend inside plot
+    legend.title = element_blank(),                                                 # No legend title
+    legend.background = element_rect(fill = "white", color = "black", size = 0.5),  # Border around legend
+    panel.grid.major = element_line(size = 0.1, color = "gray80")                   # Light grid lines
+  ) +
+  labs(title = "",
+       x = "Date",
+       y = "Number of Cases") +
+  scale_x_yearmon(breaks = seq(min(data$date), max(data$date), by = 1)) +  # Set X-axis breaks yearly
+  guides(color = guide_legend(override.aes = list(size = 4)))              # Larger points in legend
+
+# Boxplot for monthly visualization of dengue data
+# Convert month numbers to month abbreviations
+data$MonthName <- factor(month.abb[data$Months], levels = month.abb)
+
+# Plot with log scale and month names on the x-axis
+ggplot(data, aes(x = MonthName, y = Cases)) +
+  geom_boxplot(fill = "lightblue") +
+  scale_y_log10(labels = comma) +  # Use comma format to avoid scientific notation
+  labs(title = "", 
+       x = "Months", y = "Log(Dengue Cases)") +
+  theme_minimal()
+
+#log transformation
+data$Cases_log <- log1p(data$Cases)  # log1p to handle zeros
+ts_log <- ts(data$Cases_log, frequency = 12, start = c(2000, 1))
+plot(ts_log)
+decompose(ts_log)
+
+# ADF Test for Log-transformed Data
+adf_test_log <- adf.test(ts_log, alternative = "stationary")
+print(adf_test_log)
+
+##Removing outliers temporarily
+data_no_outliers <- subset(data, Year != 2019 & Year != 2023)
+ts_no_outliers <- ts(data_no_outliers$Cases, frequency = 12, start = c(2000, 1))
+decompose(ts_no_outliers)
+
+
+##seasonal differencing
+diff_seasonal_ts <- diff(ts_log, lag = 12)  # Seasonal differencing
+decompose(diff_seasonal_ts)
+
+
+# ADF Test for Seasonal Differenced Data
+adf_test_seasonal_diff <- adf.test(diff_seasonal_ts, alternative = "stationary")
+print(adf_test_seasonal_diff)
+
+# Decompose log-transformed time series
+decomp_log <- decompose(ts_log)
+plot(decomp_log)
+
+# ACF and PACF plots
+par(mfrow = c(1, 1))
+p1<-ggAcf(ts_log)+ggtitle("");p1
+p2<-ggPacf(ts_log)+ggtitle("");p2
+grid.arrange(p1,p2)
+
+
+##Modeling
+# Fit ARIMA model using auto.arima
+Model <- auto.arima(ts_log, seasonal = TRUE, stepwise = TRUE, approximation = FALSE,trace=TRUE)
+
+# Print model summary
+summary(Model)
+
+# Check residuals
+checkresiduals(Model)
+
+# Forecast and plot
+forecasted <- forecast(Model, h = 60)  # Forecasting the next 60 periods
+plot(forecasted)
+
+
+# Convert forecasted values from log scale to original scale
+forecasted$mean <- exp(forecasted$mean) - 1
+forecasted$lower[,1] <- exp(forecasted$lower[,1]) - 1
+forecasted$upper[,1] <- exp(forecasted$upper[,1]) - 1
+
+# Create a data frame for plotting
+forecast_df <- data.frame(
+  Date = seq(as.Date("2024-01-01"), by = "month", length.out = 60),
+  Forecast = forecasted$mean
+)
+
+# Convert original time series data to a data frame
+original_df <- data.frame(
+  Date = as.Date(as.yearmon(time(dengue_ts))),
+  Cases = as.numeric(dengue_ts)
+)
+# Create a data frame for forecasted values
+forecast_df <- data.frame(
+  Date = seq(as.Date("2024-01-01"), by = "month", length.out = 60),
+  Forecast = forecasted$mean,
+  Lower = forecasted$lower[,1],
+  Upper = forecasted$upper[,1]
+)
+
+
+# Plot using ggplot2 with shading for forecast period
+ggplot() +
+  geom_line(data = original_df, aes(x = Date, y = Cases), color = "blue", size = 1.2) +
+  geom_line(data = forecast_df, aes(x = Date, y = Forecast), color = "red", size = 1.2) +
+  geom_ribbon(data = forecast_df, aes(x = Date, ymin = 0, ymax = Forecast), alpha = 0.2, fill = "red") +
+  labs(title = "",
+       y = "Cases",
+       x = "Year") +
+  theme_minimal(base_size = 15) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 14),
+        axis.text = element_text(size = 12),
+        plot.title = element_text(size = 16, face = "bold"),
+        panel.grid.major = element_line(color = "grey80"),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank()) +
+  scale_x_date(limits = as.Date(c("2000-01-01", "2028-12-31")), date_breaks = "1 year", date_labels = "%Y") +
+  scale_y_continuous(labels = label_comma())  # Format y-axis without scientific notation
